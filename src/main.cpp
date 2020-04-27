@@ -250,14 +250,17 @@ float readBattery()
 
 void read_and_send_data() {
   DynamicJsonDocument root(1024);
+  
   root["device_id"] = device_id;
   root["temperature_dht_celsius"] = dht.readTemperature();
   root["humidity_dht_percent"] = dht.readHumidity();
+
   if (bme_found){
     root["temperature_bme_celsius"] = bmp.readTemperature();
     root["humidity_bme_percent"] = bmp.readHumidity();
     root["pressure_bme_pascal"] = bmp.readPressure();
   }
+  
   root["water"] = readSoil();
   root["salt"] = readSalt();
   root["light"] = lightMeter.readLightLevel();
@@ -266,6 +269,7 @@ void read_and_send_data() {
   Serial.print(F("Sending payload: "));
   serializeJson(root, Serial);
   Serial.println("");
+
   if(reconnect_mqtt(mqtt_client, client_id.c_str())) {
     String payload;
     serializeJson(root, payload);
@@ -275,13 +279,14 @@ void read_and_send_data() {
       mqtt_client.disconnect();
       Serial.println("Success sending message");
     } else {
-        Serial.println("Error sending message");
+      Serial.println("Error sending message");
     }
   }
 }
 
 void loop() {
   read_and_send_data();
+
   Serial.println(F("Flushing wifi client"));
   wifi_client.flush();
   Serial.println(F("Disconnecting wifi"));
@@ -291,8 +296,11 @@ void loop() {
   Serial.print(F("Going to sleep after "));
   Serial.print(millis());
   Serial.println(F("ms"));
+  Serial.print(F("Going to sleep for "));
+  Serial.print(DEEP_SLEEP_MINUTES);
+  Serial.println(F(" minutes"));
   Serial.flush();
-  //pinMode(I2C_SDA,INPUT); // needed because Wire.end() enables pullups, power Saving
-  //pinMode(I2C_SCL,INPUT);
+
+  // Sleep
   ESP.deepSleep(DEEP_SLEEP_SECONDS * 1000000);
 }
