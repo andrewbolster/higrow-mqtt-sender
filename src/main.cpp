@@ -7,14 +7,18 @@
 #include <BH1750.h>
 #include <DHT.h>
 #include <Adafruit_BME280.h>
+#include <esp32fota.h>
 
 #include "device_id.h"
 #include "mqtt.h"
 
+#define VERSION 0
+#define DEBUG 0
 
-const String TOPIC_PREFIX = "higrow_plant_monitor/";
-const String TOPIC_SUFFIX = "/state";
-const int DEEP_SLEEP_MINUTES = 20; // CHANGE ME TO 20
+const String MODULE = "higrow_plant_monitor";
+const String TOPIC_PREFIX = MODULE+"/";
+const String PUB_TOPIC_SUFFIX = "/state";
+const int DEEP_SLEEP_MINUTES = 5; // CHANGE ME TO 20
 const int DEEP_SLEEP_SECONDS = 60 * DEEP_SLEEP_MINUTES;
 
 const int WATER_MEASUREMENTS = 10;
@@ -30,9 +34,9 @@ String topic;
 
 WiFiClient wifi_client;
 PubSubClient mqtt_client(wifi_client);
+esp32FOTA esp32FOTA(MODULE, VERSION);
 
 const int WIFI_CONNECT_TIMEOUT_SECONDS = 10;
-
 
 // Simple ds18b20 class
 class DS18B20
@@ -133,6 +137,7 @@ bool bme_found = false;
 boolean connect_wifi() {
   Serial.print(F("Connecting to wifi "));
   Serial.println(WIFI_SSID);
+  WiFi.disconnect() ;
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   for (int i=0; i<WIFI_CONNECT_TIMEOUT_SECONDS && WiFi.status() != WL_CONNECTED; i++) {
@@ -147,7 +152,8 @@ boolean connect_wifi() {
     Serial.println(WiFi.localIP());
     return true;
   } else {
-    Serial.println(F("Failed to connect to WiFi"));
+    Serial.println(F("Failed to connect to WiFi; current status = "));
+    Serial.println(WiFi.status());
     return false;
   }
 }
@@ -166,53 +172,6 @@ void print_info() {
   Serial.print(F("Mqtt client id: "));
   Serial.println(client_id);
   Serial.println(F("------------------------------------------------------------"));
-}
-
-void setup() {
-  Serial.begin(115200);
-  Serial.println("");
-
-  //device setup
-  Wire.begin(I2C_SDA, I2C_SCL);
-
-  dht.begin();
-
-  pinMode(POWER_CTRL, OUTPUT);
-  digitalWrite(POWER_CTRL, 1);
-  delay(1000);
-
-  if (!bmp.begin()) {
-      Serial.println(F("Could not find a valid BMP280 sensor, check wiring!"));
-      bme_found = false;
-  } else {
-      bme_found = true;
-  }
-
-  if (lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE)) {
-      Serial.println(F("BH1750 Advanced begin"));
-  } else {
-      Serial.println(F("Error initialising BH1750"));
-  }
-
-  while(isnan(dht.readTemperature(true))){
-    Serial.println(dht.read());
-    Serial.println(dht.readTemperature()); /// rage...
-    Serial.println(dht.readHumidity());
-    Serial.println(bmp.readTemperature());
-    sleep(1);
-  }
-
-  Serial.println(F("Hello :)\nHigrow MQTT sender\nhttps://github.com/tom-mi/higrow-mqtt-sender"));
-
-  device_id = get_device_id();
-  client_id = "higrow_" + device_id;
-  topic = TOPIC_PREFIX + device_id + TOPIC_SUFFIX;
-
-  print_info();
-
-  connect_wifi();
-  mqtt_client.setServer(MQTT_BROKER_HOST, String(MQTT_BROKER_PORT).toInt());
-
 }
 
 uint32_t readSalt()
@@ -265,6 +224,7 @@ void read_and_send_data() {
   root["salt"] = readSalt();
   root["light"] = lightMeter.readLightLevel();
   root["battery"] = readBattery();
+  root["version"] = VERSION;
 
   Serial.print(F("Sending payload: "));
   serializeJson(root, Serial);
@@ -284,23 +244,89 @@ void read_and_send_data() {
   }
 }
 
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("");
+
+  //device setup
+  
+  esp32FOTA.checkURL = "http://snowden/Public/fota/higrow_plant_monitor.json";
+
+  Wire.begin(I2C_SDA, I2C_SCL);
+
+  dht.begin();
+  pinMode(POWER_CTRL, OUTPUT);
+  digitalWrite(POWER_CTRL, 1);
+  delay(1000);
+
+  if (!bmp.begin()) {
+      Serial.println(F("Could not find a valid BMP280 sensor, check wiring!"));
+      bme_found = false;
+  } else {
+      bme_found = true;
+  }
+
+  if (lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE)) {
+      Serial.println(F("BH1750 Advanced begin"));
+  } else {
+      Serial.println(F("Error initialising BH1750"));
+  }
+
+  while(isnan(dht.readTemperature(true))){
+    Serial.println(dht.read());
+    Serial.println(dht.readTemperature()); /// rage...
+    Serial.println(dht.readHumidity());
+    Serial.println(bmp.readTemperature());
+    sleep(1);
+  }
+
+  Serial.println(F("Hello :)\nHigrow MQTT sender\nhttps://github.com/tom-mi/higrow-mqtt-sender"));
+
+  device_id = get_device_id();
+  client_id = "higrow_" + device_id;
+  topic = TOPIC_PREFIX + device_id + PUB_TOPIC_SUFFIX;
+
+  print_info();
+
+  while(!connect_wifi()){
+    Serial.println("Couldn't connect to Wifi, sleeping for 5 seconds");
+    ESP.deepSleep(5*1e6);
+  }
+  mqtt_client.setServer(MQTT_BROKER_HOST, String(MQTT_BROKER_PORT).toInt());
+
+}
+
 void loop() {
   read_and_send_data();
 
   Serial.println(F("Flushing wifi client"));
   wifi_client.flush();
-  Serial.println(F("Disconnecting wifi"));
-  WiFi.disconnect(true, false);
+  bool updatedNeeded = esp32FOTA.execHTTPcheck();
+  if (updatedNeeded)
+  {
+    Serial.println("Got newer version than "+VERSION);
+    esp32FOTA.execOTA();
+    Serial.flush();
+  } else {
+    Serial.println(F("Disconnecting wifi"));
+    WiFi.disconnect(true, false);
 
-  delay(500);  // Wait a bit to ensure message sending is complete
-  Serial.print(F("Going to sleep after "));
-  Serial.print(millis());
-  Serial.println(F("ms"));
-  Serial.print(F("Going to sleep for "));
-  Serial.print(DEEP_SLEEP_MINUTES);
-  Serial.println(F(" minutes"));
-  Serial.flush();
+    delay(500);  // Wait a bit to ensure message sending is complete
+    if (DEBUG == 0) {
+      Serial.print(F("Going to sleep after "));
+      Serial.print(millis());
+      Serial.println(F("ms"));
+      Serial.print(F("Going to sleep for "));
+      Serial.print(DEEP_SLEEP_MINUTES);
+      Serial.println(F(" minutes"));
+      Serial.flush();
+      // Sleep
+      ESP.deepSleep(DEEP_SLEEP_SECONDS * 1000000);
+    } else {
+      Serial.println("No Sleep Till Brooklyn!");
+      ESP.deepSleep(2 * 1000000);
+    }
+  }
 
-  // Sleep
-  ESP.deepSleep(DEEP_SLEEP_SECONDS * 1000000);
 }
